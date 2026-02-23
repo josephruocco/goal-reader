@@ -1,0 +1,21 @@
+{
+  "manifest_version": 3,
+  "name": "Goal Reader (PDF)",
+  "version": "0.1.0",
+  "description": "Open PDFs in a goal-based reader with page progress + timer.",
+  "permissions": ["storage", "contextMenus", "tabs"],
+  "host_permissions": ["http://*/*", "https://*/*"],
+  "background": {
+    "service_worker": "sw.js"
+  },
+  "action": {
+    "default_title": "Goal Reader"
+  },
+  "icons": {},
+  "web_accessible_resources": [
+    {
+      "resources": ["pdfjs/*"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}
