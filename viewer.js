@@ -1,5 +1,4 @@
 import * as pdfjsLib from "./pdfjs/pdf.mjs";
-
 pdfjsLib.GlobalWorkerOptions.workerSrc = "./pdfjs/pdf.worker.mjs";
 
 const qs = new URLSearchParams(location.search);
@@ -9,14 +8,20 @@ const el = (id) => document.getElementById(id);
 
 const ui = {
   fileMeta: el("fileMeta"),
+
   startPage: el("startPage"),
   goalPages: el("goalPages"),
+  goalMinutes: el("goalMinutes"),
+  timerMode: el("timerMode"),
   applyGoal: el("applyGoal"),
 
   currentPage: el("currentPage"),
   totalPages: el("totalPages"),
   endPage: el("endPage"),
   remainingPages: el("remainingPages"),
+
+  remainingTime: el("remainingTime"),
+  paceNeeded: el("paceNeeded"),
 
   progressText: el("progressText"),
   barInner: el("progressBarInner"),
@@ -29,7 +34,6 @@ const ui = {
 };
 
 function stableKeyForPdf(url) {
-  // good enough: store by full URL
   return `goalReader:${url}`;
 }
 
@@ -45,25 +49,37 @@ function fmtHMS(totalSeconds) {
   return `${hh}:${mm}:${ss}`;
 }
 
+function fmtPace(pagesPerMin) {
+  if (!Number.isFinite(pagesPerMin) || pagesPerMin <= 0) return "–";
+  if (pagesPerMin >= 1) return `${pagesPerMin.toFixed(2)} pages/min`;
+  const minPerPage = 1 / pagesPerMin;
+  return `${minPerPage.toFixed(2)} min/page`;
+}
+
 /**
- * State persisted per PDF:
+ * Persisted per PDF:
  * - startPage
  * - goalPages
+ * - goalMinutes
+ * - timerMode ("countup" | "countdown")
  * - lastPage
- * - timerSeconds (optional)
+ * - elapsedSeconds (time actually spent in active timer)
  */
 const state = {
   startPage: 1,
   goalPages: 10,
+  goalMinutes: 20,
+  timerMode: "countup",
   lastPage: 1,
-  timerSeconds: 0,
+
+  elapsedSeconds: 0,
   timerRunning: false,
   timerStartedAtMs: null
 };
 
 let pdfDoc = null;
 let totalPages = 0;
-let pageCanvases = []; // [{ pageNum, canvas, topOffsetPx, heightPx }]
+let pageCanvases = [];
 
 async function loadSavedState() {
   const key = stableKeyForPdf(pdfUrl);
@@ -72,8 +88,10 @@ async function loadSavedState() {
     const s = saved[key];
     if (Number.isFinite(s.startPage)) state.startPage = s.startPage;
     if (Number.isFinite(s.goalPages)) state.goalPages = s.goalPages;
+    if (Number.isFinite(s.goalMinutes)) state.goalMinutes = s.goalMinutes;
+    if (typeof s.timerMode === "string") state.timerMode = s.timerMode;
     if (Number.isFinite(s.lastPage)) state.lastPage = s.lastPage;
-    if (Number.isFinite(s.timerSeconds)) state.timerSeconds = s.timerSeconds;
+    if (Number.isFinite(s.elapsedSeconds)) state.elapsedSeconds = s.elapsedSeconds;
   }
 }
 
@@ -83,20 +101,82 @@ async function saveState() {
   payload[key] = {
     startPage: state.startPage,
     goalPages: state.goalPages,
+    goalMinutes: state.goalMinutes,
+    timerMode: state.timerMode,
     lastPage: state.lastPage,
-    timerSeconds: state.timerSeconds
+    elapsedSeconds: state.elapsedSeconds
   };
   await chrome.storage.local.set(payload);
 }
 
-function syncGoalInputsToState() {
+function syncInputsToState() {
   ui.startPage.value = String(state.startPage);
   ui.goalPages.value = String(state.goalPages);
+  ui.goalMinutes.value = String(state.goalMinutes);
+  ui.timerMode.value = state.timerMode;
 }
 
 function computeEndPage() {
-  // goalPages is a count from startPage inclusive
-  return clamp(state.startPage + state.goalPages - 1, 1, totalPages);
+  return clamp(state.startPage + state.goalPages - 1, 1, totalPages || 1);
+}
+
+function goalSeconds() {
+  return Math.max(1, Math.floor(state.goalMinutes * 60));
+}
+
+function currentElapsedSecondsLive() {
+  if (!state.timerRunning) return state.elapsedSeconds;
+  const now = Date.now();
+  const elapsed = Math.floor((now - state.timerStartedAtMs) / 1000);
+  return state.elapsedSeconds + Math.max(0, elapsed);
+}
+
+function timerDisplaySeconds() {
+  const liveElapsed = currentElapsedSecondsLive();
+  if (state.timerMode === "countdown") {
+    return Math.max(0, goalSeconds() - liveElapsed);
+  }
+  return liveElapsed;
+}
+
+function updateTimerUI() {
+  ui.timerDisplay.textContent = fmtHMS(timerDisplaySeconds());
+  ui.timerToggle.textContent = state.timerRunning ? "Pause" : "Start";
+}
+
+async function pauseTimer() {
+  if (!state.timerRunning) return;
+  const now = Date.now();
+  const elapsed = Math.floor((now - state.timerStartedAtMs) / 1000);
+  state.elapsedSeconds += Math.max(0, elapsed);
+  state.timerRunning = false;
+  state.timerStartedAtMs = null;
+  updateTimerUI();
+  await saveState();
+}
+
+function startTimer() {
+  if (state.timerRunning) return;
+
+  // If countdown already finished, restarting from 0 is annoying; reset first.
+  if (state.timerMode === "countdown") {
+    const rem = goalSeconds() - state.elapsedSeconds;
+    if (rem <= 0) {
+      state.elapsedSeconds = 0;
+    }
+  }
+
+  state.timerRunning = true;
+  state.timerStartedAtMs = Date.now();
+  updateTimerUI();
+}
+
+async function resetTimer() {
+  state.elapsedSeconds = 0;
+  state.timerRunning = false;
+  state.timerStartedAtMs = null;
+  updateTimerUI();
+  await saveState();
 }
 
 function updateGoalUI() {
@@ -108,73 +188,41 @@ function updateGoalUI() {
   const cur = clamp(state.lastPage, 1, totalPages || 1);
   ui.currentPage.textContent = totalPages ? String(cur) : "–";
 
-  const remaining = totalPages ? Math.max(0, end - cur) : 0;
-  ui.remainingPages.textContent = totalPages ? String(remaining) : "–";
+  const remainingPages = totalPages ? Math.max(0, end - cur) : 0;
+  ui.remainingPages.textContent = totalPages ? String(remainingPages) : "–";
 
+  // Page progress %
   let pct = 0;
   if (totalPages) {
     const denom = Math.max(1, end - state.startPage);
     pct = clamp(((cur - state.startPage) / denom) * 100, 0, 100);
   }
-
   ui.barInner.style.width = `${pct.toFixed(1)}%`;
+
+  // Time remaining + pace needed
+  const liveElapsed = currentElapsedSecondsLive();
+  const timeRemainingSec = Math.max(0, goalSeconds() - liveElapsed);
+  ui.remainingTime.textContent = fmtHMS(timeRemainingSec);
+
+  const timeRemainingMin = timeRemainingSec / 60;
+  const pace = timeRemainingMin > 0 ? remainingPages / timeRemainingMin : Infinity;
+  ui.paceNeeded.textContent = fmtPace(pace);
 
   if (!totalPages) {
     ui.progressText.textContent = "Loading…";
   } else {
-    ui.progressText.textContent = `Progress: ${pct.toFixed(
-      1
-    )}% (goal: pages ${state.startPage} → ${end})`;
+    ui.progressText.textContent =
+      `Pages: ${pct.toFixed(1)}% (goal: ${state.startPage} → ${end})  •  ` +
+      `Time: ${fmtHMS(timeRemainingSec)} remaining  •  Pace: ${fmtPace(pace)}`;
   }
 }
 
-function updateTimerUI() {
-  ui.timerDisplay.textContent = fmtHMS(state.timerSeconds);
-  ui.timerToggle.textContent = state.timerRunning ? "Pause" : "Start";
-}
-
-function startTimer() {
-  if (state.timerRunning) return;
-  state.timerRunning = true;
-  state.timerStartedAtMs = Date.now();
-  updateTimerUI();
-}
-
-async function pauseTimer() {
-  if (!state.timerRunning) return;
-  const now = Date.now();
-  const elapsed = Math.floor((now - state.timerStartedAtMs) / 1000);
-  state.timerSeconds += Math.max(0, elapsed);
-  state.timerRunning = false;
-  state.timerStartedAtMs = null;
-  updateTimerUI();
-  await saveState();
-}
-
-async function resetTimer() {
-  state.timerSeconds = 0;
-  state.timerRunning = false;
-  state.timerStartedAtMs = null;
-  updateTimerUI();
-  await saveState();
-}
-
-setInterval(async () => {
-  if (!state.timerRunning) return;
-  const now = Date.now();
-  const elapsed = Math.floor((now - state.timerStartedAtMs) / 1000);
-  // don’t permanently add here, just render “live”
-  ui.timerDisplay.textContent = fmtHMS(state.timerSeconds + Math.max(0, elapsed));
-}, 250);
-
 function getVisiblePage(viewerEl) {
-  // choose the page whose canvas center is closest to viewer center
   const center = viewerEl.scrollTop + viewerEl.clientHeight / 2;
-
   let best = { pageNum: 1, dist: Infinity };
+
   for (const p of pageCanvases) {
-    const top = p.topOffsetPx;
-    const mid = top + p.heightPx / 2;
+    const mid = p.topOffsetPx + p.heightPx / 2;
     const d = Math.abs(mid - center);
     if (d < best.dist) best = { pageNum: p.pageNum, dist: d };
   }
@@ -187,7 +235,6 @@ async function renderAllPages() {
   ui.canvasWrap.innerHTML = "";
   pageCanvases = [];
 
-  // rendering scale: tweak if you want
   const scale = 1.35;
 
   for (let pageNum = 1; pageNum <= totalPages; pageNum++) {
@@ -203,30 +250,19 @@ async function renderAllPages() {
 
     ui.canvasWrap.appendChild(canvas);
 
-    await page.render({
-      canvasContext: ctx,
-      viewport
-    }).promise;
+    await page.render({ canvasContext: ctx, viewport }).promise;
 
-    // record offsets for page detection
-    // offsetTop is relative to offsetParent; we want relative to scroll container,
-    // so compute after insertion:
-    const rect = canvas.getBoundingClientRect();
-    // will update on scroll using offsetTop which is stable in layout:
     pageCanvases.push({
       pageNum,
-      canvas,
       topOffsetPx: canvas.offsetTop,
       heightPx: canvas.offsetHeight
     });
   }
 
-  // scroll to last page (saved)
+  // Jump to last saved page
   const startAt = clamp(state.lastPage, 1, totalPages);
   const target = pageCanvases.find((p) => p.pageNum === startAt);
-  if (target) {
-    viewerEl.scrollTop = Math.max(0, target.topOffsetPx - 10);
-  }
+  if (target) viewerEl.scrollTop = Math.max(0, target.topOffsetPx - 10);
 
   updateGoalUI();
 
@@ -253,37 +289,47 @@ async function loadPdf() {
 
   ui.fileMeta.textContent = pdfUrl;
 
-  // Load PDF (extension page fetch usually bypasses normal CORS if host_permissions are set)
-  const loadingTask = pdfjsLib.getDocument({
-    url: pdfUrl,
-    withCredentials: false
-  });
-
+  const loadingTask = pdfjsLib.getDocument({ url: pdfUrl, withCredentials: false });
   pdfDoc = await loadingTask.promise;
   totalPages = pdfDoc.numPages;
 
-  // Clamp saved values
+  // Clamp
   state.startPage = clamp(state.startPage, 1, totalPages);
   state.goalPages = clamp(state.goalPages, 1, totalPages);
   state.lastPage = clamp(state.lastPage, 1, totalPages);
+  state.goalMinutes = Math.max(1, Math.floor(state.goalMinutes));
 
-  syncGoalInputsToState();
+  syncInputsToState();
   updateTimerUI();
   updateGoalUI();
 
   await renderAllPages();
 }
 
+/* ===== UI events ===== */
+
 ui.applyGoal.addEventListener("click", async () => {
   const sp = Number(ui.startPage.value);
   const gp = Number(ui.goalPages.value);
+  const gm = Number(ui.goalMinutes.value);
+  const mode = ui.timerMode.value;
 
   state.startPage = clamp(Number.isFinite(sp) ? sp : 1, 1, totalPages || 1);
   state.goalPages = clamp(Number.isFinite(gp) ? gp : 1, 1, totalPages || 1);
+  state.goalMinutes = Math.max(1, Math.floor(Number.isFinite(gm) ? gm : 20));
+  state.timerMode = mode === "countdown" ? "countdown" : "countup";
 
-  // If you're before the start, snap to start
   if (totalPages && state.lastPage < state.startPage) state.lastPage = state.startPage;
 
+  updateTimerUI();
+  updateGoalUI();
+  await saveState();
+});
+
+// Change mode immediately (no need to hit Apply)
+ui.timerMode.addEventListener("change", async () => {
+  state.timerMode = ui.timerMode.value === "countdown" ? "countdown" : "countup";
+  updateTimerUI();
   updateGoalUI();
   await saveState();
 });
@@ -297,9 +343,27 @@ ui.timerReset.addEventListener("click", async () => {
   await resetTimer();
 });
 
+/* ===== Live tick ===== */
+setInterval(async () => {
+  // Refresh timer display regardless
+  updateTimerUI();
+
+  // If running and countdown reaches 0, auto-pause + persist
+  if (state.timerRunning && state.timerMode === "countdown") {
+    const rem = timerDisplaySeconds();
+    if (rem <= 0) {
+      await pauseTimer();
+    }
+  }
+
+  // Update pace/time remaining text live
+  updateGoalUI();
+}, 500);
+
+/* ===== Boot ===== */
 (async function main() {
   await loadSavedState();
-  syncGoalInputsToState();
+  syncInputsToState();
   updateTimerUI();
   await loadPdf();
 })();

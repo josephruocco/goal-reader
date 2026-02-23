@@ -22,10 +22,25 @@
           <label>Start</label>
           <input id="startPage" type="number" min="1" value="1" />
         </div>
+
         <div class="group">
           <label>Goal pages</label>
           <input id="goalPages" type="number" min="1" value="10" />
         </div>
+
+        <div class="group">
+          <label>Goal minutes</label>
+          <input id="goalMinutes" type="number" min="1" value="20" />
+        </div>
+
+        <div class="group">
+          <label>Timer</label>
+          <select id="timerMode">
+            <option value="countup">Count up</option>
+            <option value="countdown">Countdown</option>
+          </select>
+        </div>
+
         <button id="applyGoal">Apply</button>
 
         <div class="sep"></div>
@@ -60,12 +75,21 @@
           <div class="v" id="endPage">–</div>
         </div>
         <div class="stat">
-          <div class="k">Remaining</div>
+          <div class="k">Remaining pages</div>
           <div class="v" id="remainingPages">–</div>
         </div>
-        <div class="hint">
-          Scroll to read. Page updates automatically.
+
+        <div class="stat">
+          <div class="k">Time remaining</div>
+          <div class="v" id="remainingTime">–</div>
         </div>
+
+        <div class="stat">
+          <div class="k">Pace needed</div>
+          <div class="v" id="paceNeeded">–</div>
+        </div>
+
+        <div class="hint">Scroll to read. Page updates automatically.</div>
       </div>
 
       <div id="viewer">
