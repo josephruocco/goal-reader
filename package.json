@@ -1,16 +1,18 @@
 {
   "name": "goal-reader",
-  "version": "1.0.0",
-  "description": "",
-  "main": "sw.js",
-  "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
-  },
-  "keywords": [],
-  "author": "",
-  "license": "ISC",
-  "type": "commonjs",
+  "private": true,
+  "type": "module",
+  "version": "0.1.0",
   "dependencies": {
     "pdfjs-dist": "^5.4.624"
+  },
+  "devDependencies": {
+    "vite": "^5.4.0",
+    "vite-plugin-static-copy": "^3.2.0"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview"
   }
 }
