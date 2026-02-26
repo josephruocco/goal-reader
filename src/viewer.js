@@ -3,7 +3,7 @@ import workerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = workerUrl;
 
-// IMPORTANT: these folders must exist in dist/ (copied by Vite build)
+// Required for JPX/OpenJPEG + fonts/cmaps in MV3
 const ASSETS = {
   cMapUrl: chrome.runtime.getURL("pdfjs-assets/cmaps/"),
   cMapPacked: true,
@@ -23,6 +23,7 @@ const ui = {
 
   startPage: el("startPage"),
   goalPages: el("goalPages"),
+  skipPages: el("skipPages"),
   goalMinutes: el("goalMinutes"),
   timerMode: el("timerMode"),
   applyGoal: el("applyGoal"),
@@ -44,6 +45,11 @@ const ui = {
   timerToggle: el("timerToggle"),
   timerReset: el("timerReset")
 };
+
+// Crash fast with a clear message if HTML/IDs mismatch
+for (const [k, v] of Object.entries(ui)) {
+  if (!v) throw new Error(`Missing required DOM element: ${k}`);
+}
 
 function clamp(n, lo, hi) {
   return Math.max(lo, Math.min(hi, n));
@@ -72,13 +78,41 @@ function stableKeyForLocalFile(file) {
   return `goalReader:local:${file.name}:${file.size}:${file.lastModified}`;
 }
 
+/** skipSpec format: "1-4, 10, 23-30" */
+function parseSkipSpec(spec, maxPage) {
+  const skip = new Set();
+  const s = (spec || "").trim();
+  if (!s) return skip;
+
+  for (const part of s.split(",")) {
+    const t = part.trim();
+    if (!t) continue;
+
+    const m = t.match(/^(\d+)\s*-\s*(\d+)$/);
+    if (m) {
+      let a = Number(m[1]), b = Number(m[2]);
+      if (!Number.isFinite(a) || !Number.isFinite(b)) continue;
+      if (a > b) [a, b] = [b, a];
+      a = clamp(a, 1, maxPage);
+      b = clamp(b, 1, maxPage);
+      for (let p = a; p <= b; p++) skip.add(p);
+      continue;
+    }
+
+    const n = Number(t);
+    if (Number.isFinite(n)) skip.add(clamp(n, 1, maxPage));
+  }
+  return skip;
+}
+
 const state = {
   startPage: 1,
   goalPages: 15,
   goalMinutes: 45,
   timerMode: "countdown",
-  lastPage: 1,
+  skipSpec: "",
 
+  lastPage: 1,
   elapsedSeconds: 0,
   timerRunning: false,
   timerStartedAtMs: null
@@ -109,6 +143,7 @@ async function loadSavedState(key) {
     if (Number.isFinite(s.goalPages)) state.goalPages = s.goalPages;
     if (Number.isFinite(s.goalMinutes)) state.goalMinutes = s.goalMinutes;
     if (typeof s.timerMode === "string") state.timerMode = s.timerMode;
+    if (typeof s.skipSpec === "string") state.skipSpec = s.skipSpec;
     if (Number.isFinite(s.lastPage)) state.lastPage = s.lastPage;
     if (Number.isFinite(s.elapsedSeconds)) state.elapsedSeconds = s.elapsedSeconds;
   }
@@ -122,6 +157,7 @@ async function saveState() {
     goalPages: state.goalPages,
     goalMinutes: state.goalMinutes,
     timerMode: state.timerMode,
+    skipSpec: state.skipSpec,
     lastPage: state.lastPage,
     elapsedSeconds: state.elapsedSeconds
   };
@@ -133,6 +169,7 @@ function syncInputsToState() {
   ui.goalPages.value = String(state.goalPages);
   ui.goalMinutes.value = String(state.goalMinutes);
   ui.timerMode.value = state.timerMode;
+  ui.skipPages.value = state.skipSpec || "";
 }
 
 function computeEndPage() {
@@ -194,23 +231,53 @@ async function resetTimer() {
   await saveState();
 }
 
-function updateGoalUI() {
+function buildRequiredList(curPage) {
   const end = computeEndPage();
+  const start = clamp(state.startPage, 1, totalPages || 1);
+  const skip = parseSkipSpec(state.skipSpec, totalPages || 1);
+
+  const required = [];
+  for (let p = start; p <= end; p++) {
+    if (!skip.has(p)) required.push(p);
+  }
+
+  const cur = clamp(curPage, 1, totalPages || 1);
+  return { required, start, end, skip, cur };
+}
+
+function progressPct(required, cur) {
+  if (required.length === 0) return 100;
+  const startReq = required[0];
+  const endReq = required[required.length - 1];
+
+  if (cur <= startReq) return 0;
+  if (cur >= endReq) return 100;
+
+  let done = 0;
+  for (const p of required) if (p <= cur) done++;
+
+  const denom = Math.max(1, required.length);
+  return clamp((done / denom) * 100, 0, 100);
+}
+
+function remainingRequired(required, cur) {
+  let c = 0;
+  for (const p of required) if (p > cur) c++;
+  return c;
+}
+
+function updateGoalUI() {
+  const cur = clamp(state.lastPage, 1, totalPages || 1);
+  const { required, end } = buildRequiredList(cur);
 
   ui.totalPages.textContent = totalPages ? String(totalPages) : "–";
+  ui.currentPage.textContent = totalPages ? String(cur) : "–";
   ui.endPage.textContent = totalPages ? String(end) : "–";
 
-  const cur = clamp(state.lastPage, 1, totalPages || 1);
-  ui.currentPage.textContent = totalPages ? String(cur) : "–";
-
-  const remainingPages = totalPages ? Math.max(0, end - cur) : 0;
+  const remainingPages = totalPages ? remainingRequired(required, cur) : 0;
   ui.remainingPages.textContent = totalPages ? String(remainingPages) : "–";
 
-  let pct = 0;
-  if (totalPages) {
-    const denom = Math.max(1, end - state.startPage);
-    pct = clamp(((cur - state.startPage) / denom) * 100, 0, 100);
-  }
+  const pct = totalPages ? progressPct(required, cur) : 0;
   ui.barInner.style.width = `${pct.toFixed(1)}%`;
 
   const liveElapsed = currentElapsedSecondsLive();
@@ -219,10 +286,12 @@ function updateGoalUI() {
 
   const timeRemainingMin = timeRemainingSec / 60;
   const pace = timeRemainingMin > 0 ? remainingPages / timeRemainingMin : Infinity;
-  ui.paceNeeded.textContent = fmtPace(pace);
+  ui.paceNeeded.textContent = required.length === 0 ? "–" : fmtPace(pace);
 
   ui.progressText.textContent = totalPages
-    ? `Pages: ${pct.toFixed(1)}% (goal: ${state.startPage} → ${end})  •  Time: ${fmtHMS(timeRemainingSec)} remaining  •  Pace: ${fmtPace(pace)}`
+    ? `Pages: ${pct.toFixed(1)}% (goal window: ${state.startPage} → ${end})  •  ` +
+      `Skipped: ${state.skipSpec ? state.skipSpec : "none"}  •  ` +
+      `Time: ${fmtHMS(timeRemainingSec)} remaining  •  Pace: ${required.length === 0 ? "–" : fmtPace(pace)}`
     : "Open a PDF (URL or local file).";
 }
 
@@ -238,7 +307,7 @@ async function renderPage(pageNum) {
     canvas.className = "pageCanvas";
     canvas.width = Math.floor(viewport.width);
     canvas.height = Math.floor(viewport.height);
-    canvas.dataset.pageNum = String(pageNum);
+    canvas.dataset.pageNum = String(pageNum); // critical
 
     const ctx = canvas.getContext("2d");
     if (!ctx) throw new Error("2D canvas context unavailable");
@@ -250,7 +319,7 @@ async function renderPage(pageNum) {
     await page.render({ canvasContext: ctx, viewport }).promise;
     rendered.add(pageNum);
 
-    if (visibleObserver) visibleObserver.observe(canvas);
+    // DO NOT separately observe the canvas; we track visibility via placeholders.
   } catch (e) {
     console.error("Render failed", pageNum, e);
   } finally {
@@ -273,7 +342,6 @@ async function initPlaceholdersAndObservers() {
   rendered.clear();
   inFlight.clear();
 
-  // Placeholder size from page 1
   const p1 = await pdfDoc.getPage(1);
   const vp1 = p1.getViewport({ scale: SCALE });
   const w = Math.floor(vp1.width);
@@ -297,23 +365,24 @@ async function initPlaceholdersAndObservers() {
       for (const ent of entries) {
         if (!ent.isIntersecting) continue;
         const pageNum = Number(ent.target.dataset.pageNum);
-        if (Number.isFinite(pageNum)) renderPage(pageNum);
+        if (!Number.isFinite(pageNum)) continue;
+        renderPage(pageNum);
       }
     },
     { root: viewerEl, rootMargin: "1200px 0px 1200px 0px", threshold: 0.01 }
   );
 
   let best = { pageNum: 1, ratio: 0 };
-
   visibleObserver = new IntersectionObserver(
     (entries) => {
       for (const ent of entries) {
         const pageNum = Number(ent.target.dataset.pageNum);
+        if (!Number.isFinite(pageNum)) continue;
         const ratio = ent.intersectionRatio;
         if (ratio > best.ratio) best = { pageNum, ratio };
       }
 
-      if (best.ratio > 0) {
+      if (best.ratio > 0 && Number.isFinite(best.pageNum)) {
         const p = clamp(best.pageNum, 1, totalPages);
         if (p !== state.lastPage) {
           state.lastPage = p;
@@ -355,13 +424,20 @@ async function setupAfterPdfLoaded() {
 }
 
 async function loadPdfFromUrl(url) {
-  const loadingTask = pdfjsLib.getDocument({ url, withCredentials: false, ...ASSETS });
+  const loadingTask = pdfjsLib.getDocument({
+    url,
+    withCredentials: false,
+    ...ASSETS
+  });
   pdfDoc = await loadingTask.promise;
   totalPages = pdfDoc.numPages;
 }
 
 async function loadPdfFromBytes(uint8) {
-  const loadingTask = pdfjsLib.getDocument({ data: uint8, ...ASSETS });
+  const loadingTask = pdfjsLib.getDocument({
+    data: uint8,
+    ...ASSETS
+  });
   pdfDoc = await loadingTask.promise;
   totalPages = pdfDoc.numPages;
 }
@@ -400,10 +476,17 @@ ui.applyGoal.addEventListener("click", async () => {
   state.goalPages = clamp(Number.isFinite(gp) ? gp : 1, 1, totalPages || 1);
   state.goalMinutes = Math.max(1, Math.floor(Number.isFinite(gm) ? gm : 20));
   state.timerMode = mode === "countdown" ? "countdown" : "countup";
+  state.skipSpec = ui.skipPages.value || "";
 
   if (totalPages && state.lastPage < state.startPage) state.lastPage = state.startPage;
 
   updateTimerUI();
+  updateGoalUI();
+  await saveState();
+});
+
+ui.skipPages.addEventListener("input", async () => {
+  state.skipSpec = ui.skipPages.value || "";
   updateGoalUI();
   await saveState();
 });
