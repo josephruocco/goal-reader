@@ -1,6 +1,10 @@
 # dependencies
 node_modules/
 
+# build output
+dist/
+dist-zip/
+
 # macOS
 .DS_Store
 
@@ -20,3 +24,4 @@ pnpm-debug.log*
 # env
 .env
 .env.*
+

@@ -10,6 +10,14 @@ Open PDFs in a goal-based reader with:
 
 ---
 
+## Install from Chrome Web Store
+
+Install Goal Reader (PDF) directly from the Chrome Web Store:
+
+[Goal Reader (PDF) on Chrome Web Store](https://chromewebstore.google.com/detail/goal-reader-pdf/mchomnhnininjcncokmapokihmkmeeii?authuser=0&hl=en)
+
+---
+
 ## What This Is
 
 Chrome’s built-in PDF viewer is restricted — extensions can’t reliably inject UI into it.
