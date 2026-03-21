@@ -414,6 +414,22 @@ function jumpToPage(pageNum) {
   viewerEl.scrollTop = Math.max(0, target.offsetTop - 10);
 }
 
+function previewStartPage(pageNum) {
+  if (!totalPages) return;
+  const targetPage = clamp(pageNum, 1, totalPages);
+  ui.startPage.value = String(targetPage);
+  state.startPage = targetPage;
+  state.lastPage = targetPage;
+  jumpToPage(targetPage);
+
+  // Ensure the target page is rendered quickly after the jump.
+  renderPage(targetPage);
+  renderPage(clamp(targetPage + 1, 1, totalPages));
+
+  updateGoalUI();
+  saveState();
+}
+
 async function setupAfterPdfLoaded() {
   state.startPage = clamp(state.startPage, 1, totalPages);
   state.goalPages = clamp(state.goalPages, 1, totalPages);
@@ -488,17 +504,18 @@ ui.applyGoal.addEventListener("click", async () => {
   state.skipSpec = ui.skipPages.value || "";
 
   if (totalPages) {
-    state.lastPage = state.startPage;
-    jumpToPage(state.startPage);
-
-    // Ensure the target page is rendered quickly after the jump.
-    renderPage(state.startPage);
-    renderPage(clamp(state.startPage + 1, 1, totalPages));
+    previewStartPage(state.startPage);
   }
 
   updateTimerUI();
   updateGoalUI();
   await saveState();
+});
+
+ui.startPage.addEventListener("change", async () => {
+  const sp = Number(ui.startPage.value);
+  if (!Number.isFinite(sp) || !totalPages) return;
+  previewStartPage(sp);
 });
 
 ui.skipPages.addEventListener("input", async () => {
